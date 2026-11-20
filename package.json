@@ -1,0 +1,7 @@
+{
+  "name": "gpuf",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bun test src", "demo": "bun run examples/demo.ts" },
+  "dependencies": { "fflate": "0.8.3", "htmlparser2": "10.1.0", "unpdf": "2.2.1" }
+}
