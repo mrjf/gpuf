@@ -1,13 +1,19 @@
 # Gmail-compatible search on turbopuffer
 
+**[Copy the agent instructions →](https://raw.githubusercontent.com/mrjf/gpuf/main/AGENT-INSTRUCTIONS.md)**
+
+Paste this line into your coding agent.
+
+```text
+Implement Gmail-compatible email search in my project. Follow https://raw.githubusercontent.com/mrjf/gpuf/main/AGENT-INSTRUCTIONS.md and use the reference indexing and search code it links to. Adapt it to my project's language and run the tests.
+```
+
 Each mailbox has two turbopuffer namespaces per index generation. **Messages** holds one row per email and answers Gmail filters directly. **Chunks** holds one row per searchable passage, with its parent message ID and a copy of the metadata used to filter vector searches.
 
 | Namespace | Row key | What the row indexes |
 | --- | --- | --- |
 | `gpuf-<mailbox-hash>-<generation>-messages` | `id = message_id` (Gmail message ID) | Typed metadata for equality, membership and range filters. Full-text, fuzzy and regex indexes for searching message content. |
 | `gpuf-<mailbox-hash>-<generation>-chunks` | `id = <message_id>-<section>-<offset>` (section ordinal and Unicode code-point offset) | Passage `text` with a native `voyage/voyage-4` embedding (1,024 dimensions, f16, cosine). Each row carries `message_id`, `source`, a snippet and filterable parent metadata. |
-
-**[Copy the agent instructions →](https://raw.githubusercontent.com/mrjf/gpuf/main/AGENT-INSTRUCTIONS.md)**
 
 ## How the fields answer a query
 
@@ -35,12 +41,6 @@ For `from:lee@example.org has:attachment subject:"delivery receipt"`, the compil
 ```
 
 Strict search runs the entire filter on messages before sorting or paginating. A semantic search with the same constraints can filter chunks by sender, attachment presence and labels during vector retrieval. It then looks up the candidate parent IDs in messages and applies the full filter, including the subject phrase, before returning a hit. [Exact schema declarations](src/gmail-index.ts) · [Filter compiler](src/gmail-query.ts) · [Search planner](src/gmail-search.ts)
-
-Paste this line into your coding agent.
-
-```text
-Implement Gmail-compatible email search in my project. Follow https://raw.githubusercontent.com/mrjf/gpuf/main/AGENT-INSTRUCTIONS.md and use the reference indexing and search code it links to. Adapt it to my project's language and run the tests.
-```
 
 ## Run the reference
 
