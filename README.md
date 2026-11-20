@@ -96,22 +96,3 @@ Compatibility targets Gmail API **message** results. Gmail’s UI also expands c
 4. **Evaluate ranking separately.** For typo and paraphrase queries, record known-target rank and top-three usefulness. Read source evidence, blind the two ranked lists as A/B, allow ties and insufficient evidence, and include plausible queries with no correct answer. Ranked top-k overlap cannot establish strict equality.
 
 The recorded development suite had **664 queries** covering 613 strict syntax cases, 33 typos and 18 paraphrases. On a frozen **2,976-message** corpus, **607 of 613** strict result sets agreed after rebuilding the message index. **569** queries were empty on both sides in the original diagnostic, so aggregate agreement alone overstates positive operator coverage. The six remaining discrepancies included three brace expressions, quoted history, a subject word and an unsubscribe match. This was a partial-corpus development run. No private queries, identifiers or mail are required to run the repository tests.
-
-## How fast was it compared with Gmail?
-
-On November 20, 2026, we timed the first page an application could display. Each side returned up to **ten message summaries**. Gmail used one message-list call followed by a batched metadata read. The index used one strict search with stored summary fields. Both were timed from the same client through the same application transport, through receipt and decoding of the response.
-
-| First-page latency, successful pairs | Median | p95 |
-| --- | ---: | ---: |
-| turbopuffer-backed strict search | **361 ms** | **531 ms** |
-| Gmail API with message summaries | **1,338 ms** | **5,192 ms** |
-
-The index returned the page first in all **15 completed pairs**. Of 24 attempts per side, the index completed 24 and Gmail completed 15. The table includes only pairs where both succeeded. All 15 had ten results on each side. Twelve pairs had identical ID sets. Summing the ID overlap within each pair gives **147 shared hits out of 150**. Backfill was incomplete throughout. With 15 pairs, nearest-rank p95 is the slowest completed request. This run measures four repeated API queries and leaves Gmail web UI latency and full-mailbox performance open.
-
-**Repeat the speed test**
-
-1. From one client, use `in:inbox`, `in:sent`, `has:attachment` and `subject:receipt`. Run six rounds. Rotate the starting query by one each round and alternate which backend goes first for each query. Run requests serially with a 30-second deadline and no retries. Include the first round. The run used ordinary service caches throughout.
-2. Request ten summaries from each backend. For Gmail, list up to ten IDs, then batch `messages.get(format=metadata)` for From, To, Subject, Date, labels, thread ID and snippet. For the index, call `searchMailIndex` with `mode: 'gmail'` and `limit: 10` through the application. Start a monotonic timer before the request and stop after decoding the summaries.
-3. Record both elapsed times, returned counts, ID-set overlap, coverage and failures. For completed pairs, sort each side’s durations and report the entries at ranks `ceil(0.50 × n)` and `ceil(0.95 × n)`. Keep failed requests in the attempt counts. For a broader benchmark, repeat on a fully synchronized corpus and report cold starts, steady-state latency, and time to enumerate all pages separately.
-
-A separate **IDs-only** Gmail baseline across 664 queries had a first-page median of **366 ms** and p95 of **1,330 ms**. It skipped summary hydration and allowed up to 500 IDs per page. Use that baseline for the cost of finding IDs. Use the paired table above for the cost of displaying a page of results.
