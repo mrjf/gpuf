@@ -1,14 +1,46 @@
 # Gmail-compatible search on turbopuffer
 
+Each mailbox has two turbopuffer namespaces per index generation. **Messages** holds one row per email and answers Gmail filters directly. **Chunks** holds one row per searchable passage, with its parent message ID and a copy of the metadata used to filter vector searches.
+
+| Namespace | Row key | What the row indexes |
+| --- | --- | --- |
+| `gpuf-<mailbox-hash>-<generation>-messages` | `id = message_id` (Gmail message ID) | Typed metadata for equality, membership and range filters. Full-text, fuzzy and regex indexes for searching message content. |
+| `gpuf-<mailbox-hash>-<generation>-chunks` | `id = <message_id>-<section>-<offset>` (section ordinal and Unicode code-point offset) | Passage `text` with a native `voyage/voyage-4` embedding (1,024 dimensions, f16, cosine). Each row carries `message_id`, `source`, a snippet and filterable parent metadata. |
+
 **[Copy the agent instructions →](https://raw.githubusercontent.com/mrjf/gpuf/main/AGENT-INSTRUCTIONS.md)**
 
-Paste this line into your coding agent:
+## How the fields answer a query
+
+| Fields | turbopuffer representation | Gmail search behavior |
+| --- | --- | --- |
+| `from_addresses`, `to_addresses`, `cc_addresses`, `bcc_addresses`, `delivered_to_addresses`, `participants` | Filterable `[]string` of lowercased addresses on messages and chunks | An exact sender address uses array membership. `to:` checks To, Cc and Bcc with an OR across the three arrays. |
+| `labels`, `query_flags`, `link_types` | Filterable `[]string` on both | `in:inbox` checks for the label ID `INBOX`. `in:archive` checks for the source-derived flag `in:archive`. `has:drive` checks for `drive` in `link_types`. |
+| `unread`, `has_attachment`; `size`, `raw_size` | Filterable `bool` and `uint` on both | `is:unread` and `has:attachment` use boolean equality. `larger:` and `smaller:` compare `size` in bytes. `raw_size` retains the original MIME byte count. |
+| `search_received_at`, `received_at`, `sent_at`; `sort_key` | Filterable `datetime` fields and a sortable `string` on both | Gmail date operators use `search_received_at`. Strict results page by `sort_key = received_at + ":" + message_id`, so messages with identical timestamps have a stable order. |
+| `thread_id`, `rfc_message_id`; `header_names`, `headers` | Filterable string IDs on both. Messages also have a filterable `[]string` of header names and a regex-indexed `[]string` of header lines. | `rfc822msgid:` tests equality against the ID with angle brackets stripped. `header:` can test for a name alone or match a value within its header line. |
+| `search_tokens`, `subject_tokens` and other field-specific token streams | Message-only `string` fields with `regex: true` | Quotes and `AROUND` match normalized token positions. A phrase cannot begin in the subject and finish in the body. |
+| `subject`, `people`, `filenames`, `body_new`, `body`, `attachment_text` | Message full-text indexes for BM25, with fuzzy indexes on the first four. `attachment_text` is an array of extracted strings. | Ranked searches score text across fields. Message fields used only for display or reranking, such as `snippet` and `rerank_text`, use `filterable: false`. |
+
+For `from:lee@example.org has:attachment subject:"delivery receipt"`, the compiler emits this message filter, including Gmail’s default Spam and Trash exclusion.
+
+```json
+["And", [
+  ["And", [
+    ["from_addresses", "ContainsAny", ["lee@example.org"]],
+    ["has_attachment", "Eq", true],
+    ["subject_tokens", "Regex", "(^| )delivery receipt( |$)"]
+  ]],
+  ["Not", ["labels", "ContainsAny", ["SPAM", "TRASH"]]]
+]]
+```
+
+Strict search runs the entire filter on messages before sorting or paginating. A semantic search with the same constraints can filter chunks by sender, attachment presence and labels during vector retrieval. It then looks up the candidate parent IDs in messages and applies the full filter, including the subject phrase, before returning a hit. [Exact schema declarations](src/gmail-index.ts) · [Filter compiler](src/gmail-query.ts) · [Search planner](src/gmail-search.ts)
+
+Paste this line into your coding agent.
 
 ```text
 Implement Gmail-compatible email search in my project. Follow https://raw.githubusercontent.com/mrjf/gpuf/main/AGENT-INSTRUCTIONS.md and use the reference indexing and search code it links to. Adapt it to my project's language and run the tests.
 ```
-
-A search such as `to:me has:attachment subject:"delivery receipt" -is:unread` asks which messages satisfy **every** condition. Parse those conditions into database filters, apply them to individual messages, and page through the matches newest first. For a question such as “which parcel arrived on Tuesday?”, the same index also supports ranked retrieval over message text and attachment passages.
 
 ## Run the reference
 
@@ -30,23 +62,15 @@ The reference uses Bun (tested with 1.4.4). The offline demo decodes a synthetic
 | [gmail-query-state.ts](src/gmail-query-state.ts) | Source-derived labels and special-state memberships, resumable refresh and publication |
 | [turbopuffer.ts](src/turbopuffer.ts) | Namespace naming, batched upserts and the REST query adapter |
 
-## What goes in the index
+## Indexing message content
 
-Give each mailbox and index generation two namespaces. A message can change folders, acquire a star, or receive a reply in the same thread. Keeping one row per **message ID** gives each result its own date, labels and attachments. Keep the thread ID for opening the conversation. The second namespace contains passages keyed by message ID, section ordinal and Unicode code-point offset. Keep the original RFC 822 bytes in durable storage so either index can be rebuilt.
+Keep the original RFC 822 bytes in durable storage so either namespace can be rebuilt. Derive `received_at` from Gmail’s `internalDate`. For `search_received_at`, use the first valid X-Received timestamp, then a valid Google Received timestamp, then the internal date. Preserve plain text and rendered HTML for matching. Build `body_new` from newly written text and cap `rerank_text` at 6,000 code points, including up to 1,200 for attachments.
 
-| Message representation | What it makes possible |
-| --- | --- |
-| Lowercased addresses by role, participants, Delivered-To, RFC Message-ID, headers and list IDs | Exact identity and header predicates. Gmail syntax `to:` searches To, Cc and Bcc. |
-| Labels, categories, source flags, booleans, sizes and dates | Filter before pagination. `received_at` comes from Gmail’s `internalDate`. `search_received_at` uses the first valid X-Received timestamp, then a Google Received timestamp, then the internal date. |
-| Full plain text, rendered HTML, names, filenames and attachment text | Find material in quoted replies and alternate MIME parts. Keep attachment extraction statuses alongside the text. |
-| Canonical text streams for each searchable source | Match terms, ordered phrases and proximity using the same tokenizer at write and query time. A phrase can’t start in the subject and end in the body. |
-| `body_new` and `rerank_text` | Rank newly written material without repeatedly rewarding quoted replies. Bound the reranker input to 6,000 code points, including up to 1,200 for attachments. |
-
-The positional tokenizer uses Unicode NFKC and lowercase, keeps decimal numbers together, and converts `1,500` to `1500`. Full-text ranking fields separately pin turbopuffer’s `word_v4` tokenizer with stemming and stopword removal disabled. Preserve both representations in a port. The exact field names, types, regex and fuzzy indexes are executable declarations at the top of the indexer. [Schema and row builder](src/gmail-index.ts) · [Tokenizer](src/gmail-query.ts)
+The positional tokenizer uses Unicode NFKC and lowercase, keeps decimal numbers together, and converts `1,500` to `1500`. Full-text ranking fields separately pin turbopuffer’s `word_v4` tokenizer with stemming and stopword removal disabled. Preserve both representations in a port. [Tokenizer](src/gmail-query.ts)
 
 Attachment extraction covers supported text and HTML, text-bearing PDFs, supported Office/OpenDocument XML, and nested RFC 822 messages. Inline MIME attachments count for `has:attachment`. Each part records `indexed`, `unsupported`, `too-large`, or `failed`. Images and scanned PDFs need an additional OCR stage. The reference caps extracted text at 2 MiB per attachment and budgets 7 MiB for searchable source text per message.
 
-Split newly written body text and each extracted attachment section into 3,000-code-point passages, stepping forward 2,600 at a time. Prefix the embedding input with subject and participants, plus the attachment source where applicable. The chunk schema uses native `voyage/voyage-4`, 1,024 dimensions, f16 and cosine distance. Chunk filter metadata lets the search planner narrow passage retrieval before checking the parent message.
+Split newly written body text and each extracted attachment section into 3,000-code-point passages, stepping forward 2,600 at a time. Prefix the embedding input with subject and participants, plus the attachment source where applicable.
 
 ## Import a mailbox and keep it current
 
